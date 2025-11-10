@@ -1,151 +1,118 @@
 import streamlit as st
-import pandas as pd
-import math
-from pathlib import Path
+import sqlite3
+import matplotlib.pyplot as plt
+from AI_Agent_Model import predict_stock
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# -------------------- DATABASE FUNCTIONS --------------------
+def init_db():
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        username TEXT PRIMARY KEY,
+        email TEXT,
+        password TEXT
+    )''')
+    conn.commit()
+    conn.close()
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+def add_user(username, email, password):
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO users (username, email, password) VALUES (?, ?, ?)", (username, email, password))
+    conn.commit()
+    conn.close()
+    return True
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+def login_user(username, password):
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
+    data = c.fetchone()
+    conn.close()
+    return data
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+# -------------------- STREAMLIT UI --------------------
+st.set_page_config(page_title="AI Agent - Stock Prediction", layout="wide")
+init_db()
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+    st.session_state.username = ""
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+# -------------------- LOGIN / REGISTER --------------------
+if not st.session_state.logged_in:
+    menu = ["Login", "Register"]
+    choice = st.sidebar.selectbox("Menu", menu)
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+    if choice == "Login":
+        st.title("🔐 Login Page")
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+        if st.button("Login"):
+            if login_user(username, password):
+                st.session_state.logged_in = True
+                st.session_state.username = username
+                st.success(f"Welcome {username}! 🎉")
+                st.rerun()
+            else:
+                st.error("❌ Invalid Username or Password")
 
-    return gdp_df
+    elif choice == "Register":
+        st.title("📝 Register New Account")
+        new_user = st.text_input("Create Username")
+        new_email = st.text_input("Email")
+        new_pass = st.text_input("Create Password", type="password")
 
-gdp_df = get_gdp_data()
+        if st.button("Register"):
+            try:
+                add_user(new_user, new_email, new_pass)
+                st.success("✅ Account created successfully! Please go to Login page.")
+            except:
+                st.error("⚠️ Username already exists. Try another.")
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+# -------------------- MAIN APP --------------------
+else:
+    st.sidebar.title(f"👋 Hello, {st.session_state.username}")
+    st.title("🤖 AI Agent for Stock Market Prediction")
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+    symbol = st.text_input("Enter Stock Symbol (e.g., INFY.NS, TCS.NS, RELIANCE.NS):")
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+    if st.button("Predict"):
+        with st.spinner("⏳ Please wait... fetching data and predicting..."):
+            result = predict_stock(symbol)
 
-# Add some spacing
-''
-''
+            # --- Safeguard against missing data ---
+            if result is None or result[0] is None:
+                st.error("⚠️ No data found for that stock symbol. Try again.")
+            else:
+                score, latest_price, next_day_pred, data_tuple = result
+                y_test, predicted_prices = data_tuple
 
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
+                st.success(f"✅ Model Accuracy: **{score * 100:.2f}%**")
+                st.write(f"**Current Price:** ₹{latest_price:.2f}")
+                st.write(f"**Predicted Next Day Price:** ₹{next_day_pred:.2f}")
 
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
+                if next_day_pred > latest_price:
+                    st.success("📈 Suggestion: BUY (Price expected to increase)")
+                else:
+                    st.warning("📉 Suggestion: SELL (Price expected to decrease)")
 
-countries = gdp_df['Country Code'].unique()
+                # --- Graph safely ---
+                if len(y_test) > 0:
+                    fig, ax = plt.subplots()
+                    ax.plot(y_test, color='blue', label='Actual')
+                    ax.plot(predicted_prices, color='red', linestyle='--', label='Predicted')
+                    ax.set_title(f"Stock Prediction for {symbol}")
+                    ax.set_xlabel("Days")
+                    ax.set_ylabel("Price (₹)")
+                    ax.legend()
+                    st.pyplot(fig)
+                else:
+                    st.info("📊 Not enough data to display graph.")
 
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+    # -------------------- LOGOUT --------------------
+    if st.button("🚪 Logout"):
+        st.session_state.logged_in = False
+        st.session_state.username = ""
+        st.rerun()
